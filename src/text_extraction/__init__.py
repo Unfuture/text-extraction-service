@@ -38,6 +38,8 @@ __version__ = "0.1.0"
 __author__ = "Unfuture"
 
 from .detector import PDFType, PDFTypeDetector, PDFClassificationResult, PageAnalysis
+from .models import Quality, ProcessorConfig, ExtractionResult
+from .processor import TwoPassProcessor
 
 __all__ = [
     # Version
@@ -47,4 +49,9 @@ __all__ = [
     "PDFTypeDetector",
     "PDFClassificationResult",
     "PageAnalysis",
+    # Processing
+    "TwoPassProcessor",
+    "ProcessorConfig",
+    "ExtractionResult",
+    "Quality",
 ]
