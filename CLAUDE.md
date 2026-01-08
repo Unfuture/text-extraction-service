@@ -128,6 +128,7 @@ get_ocr_backend()
 | Tesseract OCR | `src/text_extraction/backends/tesseract.py` | Local offline OCR fallback |
 | JSON Repair | `src/text_extraction/json_repair.py` | JSON error recovery utilities |
 | Two-Pass Processor | `src/text_extraction/processor.py` | OCR routing with fallback support |
+| Content Router | `src/text_extraction/router.py` | Page-level extraction routing with cost estimation |
 | Data Models | `src/text_extraction/models.py` | Shared data models (ProcessorConfig, ExtractionResult) |
 | FastAPI Service | `service/main.py` | REST API with /health, /classify, /extract |
 | Docker | `Dockerfile`, `docker-compose.yml` | Multi-stage build with Tesseract |
@@ -138,7 +139,6 @@ get_ocr_backend()
 
 | Component | File | Description |
 |-----------|------|-------------|
-| Content Router | `router.py` | Page-level extraction routing (optional enhancement) |
 | Async Jobs | `service/jobs.py` | Background job queue for large PDFs |
 
 ## Environment Variables

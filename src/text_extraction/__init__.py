@@ -40,6 +40,7 @@ __author__ = "Unfuture"
 from .detector import PDFType, PDFTypeDetector, PDFClassificationResult, PageAnalysis
 from .models import Quality, ProcessorConfig, ExtractionResult
 from .processor import TwoPassProcessor
+from .router import ContentRouter, RoutingDecision, RoutingStrategy, CostEstimate
 
 __all__ = [
     # Version
@@ -49,6 +50,11 @@ __all__ = [
     "PDFTypeDetector",
     "PDFClassificationResult",
     "PageAnalysis",
+    # Routing
+    "ContentRouter",
+    "RoutingDecision",
+    "RoutingStrategy",
+    "CostEstimate",
     # Processing
     "TwoPassProcessor",
     "ProcessorConfig",
