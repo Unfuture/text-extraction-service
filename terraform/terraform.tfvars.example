@@ -1,0 +1,28 @@
+# Text Extraction Service - Terraform Variables Example
+# Copy to terraform.tfvars and customize
+
+# Required
+project_id  = "your-gcp-project-id"
+environment = "dev"
+
+# Region (EU only for GDPR)
+region = "europe-west3"
+
+# Container settings
+image_tag    = "latest"
+cpu_limit    = "2"
+memory_limit = "2Gi"
+
+# Scaling
+min_instances = 0  # Scale to zero when idle
+max_instances = 10
+
+# Application settings
+langdock_ocr_model = "claude-sonnet-4-5"
+tesseract_lang     = "deu+eng"
+max_file_size_mb   = 50
+default_quality    = "balanced"
+log_level          = "INFO"
+
+# Access (set to true for public API)
+allow_public_access = false

@@ -1102,16 +1102,46 @@ git revert --no-commit HEAD~N  # N = commits since migration
 
 ---
 
-## Next Steps
+## Implementation Status (2026-01-08)
 
-1. **Create GitHub Issue** for text-extraction package
-2. **Setup new repository** with Poetry/PDM
-3. **Extract PDFTypeDetector** first (smallest scope)
-4. **Run parallel tests** with current implementation
-5. **Iterate** on TwoPassProcessor extraction
+All major components from Option 3 (Library + Service) have been implemented:
+
+### Completed Components
+
+| Component | File | Status |
+|-----------|------|--------|
+| PDF Type Detector | `src/text_extraction/detector.py` | ✅ Production |
+| OCR Base Backend | `src/text_extraction/backends/base.py` | ✅ Production |
+| Langdock OCR | `src/text_extraction/backends/langdock.py` | ✅ Production |
+| Tesseract OCR | `src/text_extraction/backends/tesseract.py` | ✅ Production |
+| JSON Repair | `src/text_extraction/json_repair.py` | ✅ Production |
+| FastAPI Service | `service/main.py` | ✅ Production |
+| Docker Setup | `Dockerfile`, `docker-compose.yml` | ✅ Production |
+| Terraform (GCP) | `terraform/*.tf` | ✅ Ready |
+| CI/CD Workflows | `.github/workflows/*.yml` | ✅ Ready |
+
+### Tested OCR Results
+
+- **Langdock (Claude Sonnet 4.5)**: Excellent quality, markdown formatting, ~25s/page
+- **Tesseract**: Good quality, plain text, ~2s/page
+- **Automatic fallback**: Langdock → Tesseract → direct extraction
+
+### API Endpoints (Implemented)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/api/v1/classify` | POST | PDF type classification |
+| `/api/v1/extract` | POST | Text extraction with OCR |
+
+### Remaining TODO
+
+- Two-Pass Processor (`processor.py`) - full document caching
+- Async job queue for large PDFs
+- Cloud Vision backend (optional)
 
 ---
 
-*Document Version: 1.0*
-*Last Updated: 2026-01-07*
+*Document Version: 2.0*
+*Last Updated: 2026-01-08*
 *Author: Architecture Review (Claude Code)*

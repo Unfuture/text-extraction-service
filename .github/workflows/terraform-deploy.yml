@@ -1,0 +1,333 @@
+# Text Extraction Service - Terraform Deployment
+# Plans on PR, applies on merge to main
+
+name: Terraform Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/terraform-deploy.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'terraform/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      action:
+        description: 'Terraform action'
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+        default: plan
+
+env:
+  TF_VERSION: '1.6.0'
+  TF_WORKING_DIR: terraform
+
+# Required for Workload Identity Federation
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  # Job 1: Terraform Validate & Format
+  validate:
+    name: Validate & Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+          terraform fmt -check -recursive -diff
+
+      - name: Terraform Init (no backend)
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+          terraform init -backend=false
+
+      - name: Terraform Validate
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+          terraform validate
+
+  # Job 2: Terraform Plan
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    needs: [validate]
+    outputs:
+      plan-exit-code: ${{ steps.plan.outputs.exitcode }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+
+      - name: Setup Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Determine Environment
+        id: env
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENV="${{ github.event.inputs.environment }}"
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            ENV="prod"
+          else
+            ENV="dev"
+          fi
+
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+          echo "Using environment: $ENV"
+
+      - name: Terraform Init
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+          terraform init
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+
+          # Get latest image tag
+          IMAGE_TAG="${{ github.sha }}"
+
+          terraform plan \
+            -var="project_id=${{ vars.GCP_PROJECT_ID }}" \
+            -var="environment=${{ steps.env.outputs.environment }}" \
+            -var="image_tag=$IMAGE_TAG" \
+            -detailed-exitcode \
+            -no-color \
+            -out=tfplan 2>&1 | tee plan-output.txt
+
+          # Capture exit code (0=no changes, 1=error, 2=changes)
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exitcode=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+          if [ "$EXIT_CODE" = "1" ]; then
+            echo "::error::Terraform plan failed"
+            exit 1
+          fi
+
+      - name: Upload Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: |
+            ${{ env.TF_WORKING_DIR }}/tfplan
+            ${{ env.TF_WORKING_DIR }}/plan-output.txt
+          retention-days: 7
+
+      - name: Comment Plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync('${{ env.TF_WORKING_DIR }}/plan-output.txt', 'utf8');
+
+            // Truncate if too long
+            const maxLength = 60000;
+            const truncated = planOutput.length > maxLength
+              ? planOutput.substring(0, maxLength) + '\n\n... (truncated)'
+              : planOutput;
+
+            const output = `## Terraform Plan Results
+
+            **Environment:** \`${{ steps.env.outputs.environment }}\`
+            **Exit Code:** \`${{ steps.plan.outputs.exitcode }}\` (0=no changes, 2=changes pending)
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`terraform
+            ${truncated}
+            \`\`\`
+
+            </details>
+
+            *Pushed by @${{ github.actor }}, Commit: \`${{ github.sha }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  # Job 3: Terraform Apply (only on main or manual)
+  apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: [plan]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+    environment: ${{ github.event.inputs.environment || 'prod' }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+
+      - name: Setup Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Download Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: ${{ env.TF_WORKING_DIR }}
+
+      - name: Terraform Init
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+          terraform init
+
+      - name: Terraform Apply
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+          terraform apply -auto-approve tfplan
+
+      - name: Output Service URL
+        id: outputs
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+          SERVICE_URL=$(terraform output -raw service_url 2>/dev/null || echo "N/A")
+          echo "service-url=$SERVICE_URL" >> $GITHUB_OUTPUT
+
+          echo "## Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Service URL:** $SERVICE_URL" >> $GITHUB_STEP_SUMMARY
+
+  # Job 4: Post-deploy Health Check
+  health-check:
+    name: Post-deploy Health Check
+    runs-on: ubuntu-latest
+    needs: [apply]
+    if: needs.apply.result == 'success'
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+
+      - name: Setup Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Get Service URL
+        id: url
+        run: |
+          SERVICE_NAME="text-extraction-${{ github.event.inputs.environment || 'prod' }}"
+          REGION="europe-west3"
+
+          URL=$(gcloud run services describe "$SERVICE_NAME" \
+            --region="$REGION" \
+            --format="value(status.url)" 2>/dev/null || echo "")
+
+          if [ -z "$URL" ]; then
+            echo "::warning::Could not get service URL"
+            exit 0
+          fi
+
+          echo "url=$URL" >> $GITHUB_OUTPUT
+
+      - name: Run Health Check
+        if: steps.url.outputs.url != ''
+        run: |
+          URL="${{ steps.url.outputs.url }}"
+
+          echo "Checking health at $URL/health..."
+
+          # Get identity token for authenticated request
+          TOKEN=$(gcloud auth print-identity-token)
+
+          for i in {1..5}; do
+            RESPONSE=$(curl -s -H "Authorization: Bearer $TOKEN" "$URL/health" || echo "")
+
+            if echo "$RESPONSE" | grep -q "healthy"; then
+              echo "Health check passed!"
+              echo "$RESPONSE" | jq . || echo "$RESPONSE"
+
+              echo "## Health Check Passed" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**URL:** $URL" >> $GITHUB_STEP_SUMMARY
+              exit 0
+            fi
+
+            echo "Attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+
+          echo "::error::Health check failed after 5 attempts"
+          exit 1
+
+  # Job 5: Notification
+  notify:
+    name: Deployment Notification
+    runs-on: ubuntu-latest
+    needs: [apply, health-check]
+    if: always() && needs.apply.result != 'skipped'
+    steps:
+      - name: Create Summary
+        run: |
+          APPLY_STATUS="${{ needs.apply.result }}"
+          HEALTH_STATUS="${{ needs.health-check.result }}"
+
+          if [ "$APPLY_STATUS" = "success" ] && [ "$HEALTH_STATUS" = "success" ]; then
+            STATUS="SUCCESS"
+            EMOJI="✅"
+          else
+            STATUS="FAILED"
+            EMOJI="❌"
+          fi
+
+          echo "## Terraform Deployment $EMOJI" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** $STATUS" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ github.event.inputs.environment || 'prod' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Jobs" >> $GITHUB_STEP_SUMMARY
+          echo "- **Apply:** ${{ needs.apply.result == 'success' && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Health Check:** ${{ needs.health-check.result == 'success' && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
