@@ -15,21 +15,24 @@ Usage:
     result = processor.extract(pdf_path, quality="balanced")
 """
 
+import logging
 from pathlib import Path
-from typing import Optional, List
 
 import fitz  # PyMuPDF
 
-from text_extraction import PDFTypeDetector, PDFClassificationResult
+logger = logging.getLogger(__name__)
+
+from text_extraction import PDFClassificationResult, PDFTypeDetector
 from text_extraction.backends.base import (
     BaseOCRBackend,
-    PageOCRResult,
     ExtractionMethod,
+    PageOCRResult,
 )
 from text_extraction.models import (
-    Quality,
-    ProcessorConfig,
+    BackendStatus,
     ExtractionResult,
+    PageError,
+    ProcessorConfig,
 )
 
 
@@ -38,9 +41,9 @@ class TwoPassProcessor:
 
     def __init__(
         self,
-        primary_backend: Optional[BaseOCRBackend] = None,
-        fallback_backend: Optional[BaseOCRBackend] = None,
-        config: Optional[ProcessorConfig] = None,
+        primary_backend: BaseOCRBackend | None = None,
+        fallback_backend: BaseOCRBackend | None = None,
+        config: ProcessorConfig | None = None,
     ):
         """
         Initialize the TwoPassProcessor.
@@ -59,6 +62,7 @@ class TwoPassProcessor:
         self,
         pdf_path: Path,
         quality: str = "balanced",
+        model: str | None = None,
     ) -> ExtractionResult:
         """
         Extract text from a PDF file using the two-pass strategy.
@@ -66,6 +70,7 @@ class TwoPassProcessor:
         Args:
             pdf_path: Path to the PDF file
             quality: Extraction quality ("fast", "balanced", "accurate")
+            model: Optional model override for OCR backend
 
         Returns:
             ExtractionResult with extracted text and metadata
@@ -92,15 +97,30 @@ class TwoPassProcessor:
         # Classify PDF first
         classification = self.detector.classify_pdf(pdf_path)
 
+        # Build backend status
+        backend_status = self._build_backend_status()
+
         # Open document
         doc = fitz.open(pdf_path)
         try:
             # Process all pages
-            page_results = self._process_pages(
+            page_results, page_errors = self._process_pages(
                 doc=doc,
                 pdf_path=pdf_path,
                 classification=classification,
                 quality=quality,
+                model=model,
+            )
+
+            # Update backend status with page counts
+            ocr_pages = [
+                r for r in page_results
+                if self._page_needs_ocr(r.page_number, classification, quality)
+            ]
+            backend_status.attempted_pages = len(ocr_pages)
+            backend_status.failed_pages = len(page_errors)
+            backend_status.successful_pages = (
+                backend_status.attempted_pages - backend_status.failed_pages
             )
 
             # Build full text with optional page markers
@@ -133,6 +153,8 @@ class TwoPassProcessor:
                     "image_pages": classification.image_pages,
                     "hybrid_pages": classification.hybrid_pages,
                 },
+                backend_status=backend_status,
+                page_errors=page_errors,
             )
 
         except Exception as e:
@@ -158,7 +180,8 @@ class TwoPassProcessor:
         pdf_path: Path,
         classification: PDFClassificationResult,
         quality: str,
-    ) -> List[PageOCRResult]:
+        model: str | None = None,
+    ) -> tuple[list[PageOCRResult], list[PageError]]:
         """
         Process all pages of the document.
 
@@ -167,13 +190,15 @@ class TwoPassProcessor:
             pdf_path: Path to PDF file
             classification: PDF classification result
             quality: Extraction quality preference
+            model: Optional model override for OCR backend
 
         Returns:
-            List of PageOCRResult for each page
+            Tuple of (page results, page errors)
         """
         import time
 
-        results: List[PageOCRResult] = []
+        results: list[PageOCRResult] = []
+        page_errors: list[PageError] = []
 
         for page_num in range(len(doc)):
             page_start = time.time()
@@ -188,12 +213,22 @@ class TwoPassProcessor:
             )
 
             # Extract text
-            text, method, backend_name = self._extract_page_text(
+            text, method, backend_name, error = self._extract_page_text(
                 page=page,
                 pdf_path=pdf_path,
                 page_number=page_number,
                 needs_ocr=needs_ocr,
+                model=model,
             )
+
+            if error and needs_ocr:
+                page_errors.append(
+                    PageError(
+                        page_number=page_number,
+                        backend=backend_name,
+                        error=error,
+                    )
+                )
 
             page_time = (time.time() - page_start) * 1000
 
@@ -208,7 +243,7 @@ class TwoPassProcessor:
                 )
             )
 
-        return results
+        return results, page_errors
 
     def _page_needs_ocr(
         self,
@@ -246,7 +281,8 @@ class TwoPassProcessor:
         pdf_path: Path,
         page_number: int,
         needs_ocr: bool,
-    ) -> tuple[str, ExtractionMethod, str]:
+        model: str | None = None,
+    ) -> tuple[str, ExtractionMethod, str, str | None]:
         """
         Extract text from a single page.
 
@@ -255,50 +291,76 @@ class TwoPassProcessor:
             pdf_path: Path to PDF file
             page_number: 1-indexed page number
             needs_ocr: Whether to use OCR for this page
+            model: Optional model override for OCR backend
 
         Returns:
-            Tuple of (text, method, backend_name)
+            Tuple of (text, method, backend_name, error_message)
         """
         if needs_ocr and self.primary_backend:
-            text, method, backend_name = self._extract_with_ocr(
+            text, method, backend_name, error = self._extract_with_ocr(
                 pdf_path=pdf_path,
                 page_number=page_number,
+                model=model,
             )
             if text.strip():
-                return text, method, backend_name
+                return text, method, backend_name, None
+            # OCR failed or returned empty — fall through to direct with error
+            direct_text = page.get_text()
+            return direct_text, ExtractionMethod.DIRECT, "direct", error
 
-        # Direct extraction fallback
+        # Direct extraction (no OCR needed or no backend)
         text = page.get_text()
-        return text, ExtractionMethod.DIRECT, "direct"
+        return text, ExtractionMethod.DIRECT, "direct", None
 
     def _extract_with_ocr(
         self,
         pdf_path: Path,
         page_number: int,
-    ) -> tuple[str, ExtractionMethod, str]:
+        model: str | None = None,
+    ) -> tuple[str, ExtractionMethod, str, str | None]:
         """
         Extract text using OCR with fallback support.
 
         Args:
             pdf_path: Path to PDF file
             page_number: 1-indexed page number
+            model: Optional model override for OCR backend
 
         Returns:
-            Tuple of (text, method, backend_name)
+            Tuple of (text, method, backend_name, error_message)
         """
+        primary_error = "backend unavailable"
+
         # Try primary backend
         if self.primary_backend and self.primary_backend.is_available():
             try:
                 result = self.primary_backend.extract_text(
-                    pdf_path, page_number=page_number
+                    pdf_path, page_number=page_number, model=model
                 )
                 if result.text.strip():
-                    return result.text, result.method, self.primary_backend.name
+                    return result.text, result.method, self.primary_backend.name, None
+                primary_error = "empty response from primary backend"
             except Exception as e:
-                print(
-                    f"OCR ({self.primary_backend.name}) failed for "
-                    f"page {page_number}: {e}"
+                err_str = str(e)
+                retryable = "RetryableError" in type(e).__name__ or (
+                    hasattr(e, "__cause__")
+                    and "Retryable" in type(e.__cause__).__name__
                 )
+                if retryable:
+                    logger.warning(
+                        "OCR (%s) failed for page %d after all retries: %s",
+                        self.primary_backend.name,
+                        page_number,
+                        err_str,
+                    )
+                else:
+                    logger.warning(
+                        "OCR (%s) failed for page %d: %s",
+                        self.primary_backend.name,
+                        page_number,
+                        err_str,
+                    )
+                primary_error = err_str
 
         # Fallback to secondary backend
         if (
@@ -311,19 +373,37 @@ class TwoPassProcessor:
                     pdf_path, page_number=page_number
                 )
                 if result.text.strip():
-                    return result.text, result.method, self.fallback_backend.name
+                    return result.text, result.method, self.fallback_backend.name, None
             except Exception as e:
-                print(
-                    f"Fallback OCR ({self.fallback_backend.name}) failed for "
-                    f"page {page_number}: {e}"
+                logger.warning(
+                    "Fallback OCR (%s) failed for page %d: %s",
+                    self.fallback_backend.name,
+                    page_number,
+                    e,
                 )
+                return "", ExtractionMethod.DIRECT, "none", str(e)
 
-        return "", ExtractionMethod.DIRECT, "none"
+        return "", ExtractionMethod.DIRECT, "none", primary_error
+
+    def _build_backend_status(self) -> BackendStatus:
+        """Build a BackendStatus from current processor configuration."""
+        return BackendStatus(
+            primary_backend=self.primary_backend.name if self.primary_backend else "none",
+            primary_available=(
+                self.primary_backend.is_available() if self.primary_backend else False
+            ),
+            fallback_backend=(
+                self.fallback_backend.name if self.fallback_backend else None
+            ),
+            fallback_available=(
+                self.fallback_backend.is_available() if self.fallback_backend else False
+            ),
+        )
 
     def _build_text_parts(
         self,
-        page_results: List[PageOCRResult],
-    ) -> List[str]:
+        page_results: list[PageOCRResult],
+    ) -> list[str]:
         """
         Build text parts from page results with optional markers.
 
@@ -333,7 +413,7 @@ class TwoPassProcessor:
         Returns:
             List of formatted text strings
         """
-        text_parts: List[str] = []
+        text_parts: list[str] = []
 
         for result in page_results:
             if not result.text.strip():
@@ -354,7 +434,7 @@ class TwoPassProcessor:
     def _determine_extraction_method(
         self,
         classification: PDFClassificationResult,
-        page_results: List[PageOCRResult],
+        page_results: list[PageOCRResult],
     ) -> str:
         """
         Determine the overall extraction method used.
@@ -386,7 +466,7 @@ class TwoPassProcessor:
 
         if classification.pdf_type == PDFType.PURE_IMAGE:
             if self.primary_backend:
-                return f"direct (no OCR backend available)"
+                return "direct (no OCR backend available)"
             return "direct"
 
         return "direct"

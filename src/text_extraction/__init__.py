@@ -37,10 +37,10 @@ Advanced Usage:
 __version__ = "0.1.0"
 __author__ = "Unfuture"
 
-from .detector import PDFType, PDFTypeDetector, PDFClassificationResult, PageAnalysis
-from .models import Quality, ProcessorConfig, ExtractionResult
+from .detector import PageAnalysis, PDFClassificationResult, PDFType, PDFTypeDetector
+from .models import BackendStatus, ExtractionResult, PageError, ProcessorConfig, Quality
 from .processor import TwoPassProcessor
-from .router import ContentRouter, RoutingDecision, RoutingStrategy, CostEstimate
+from .router import ContentRouter, CostEstimate, RoutingDecision, RoutingStrategy
 
 __all__ = [
     # Version
@@ -59,5 +59,7 @@ __all__ = [
     "TwoPassProcessor",
     "ProcessorConfig",
     "ExtractionResult",
+    "BackendStatus",
+    "PageError",
     "Quality",
 ]

@@ -6,8 +6,8 @@ Shared data models for the text extraction service.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
 from enum import Enum
+from typing import Any
 
 from text_extraction.backends.base import PageOCRResult
 
@@ -32,6 +32,28 @@ class ProcessorConfig:
 
 
 @dataclass
+class BackendStatus:
+    """Status of OCR backends used during extraction."""
+
+    primary_backend: str
+    primary_available: bool
+    fallback_backend: str | None = None
+    fallback_available: bool = False
+    attempted_pages: int = 0
+    successful_pages: int = 0
+    failed_pages: int = 0
+
+
+@dataclass
+class PageError:
+    """Error from a specific page during OCR extraction."""
+
+    page_number: int
+    backend: str
+    error: str
+
+
+@dataclass
 class ExtractionResult:
     """Result from the TwoPassProcessor extraction."""
 
@@ -44,9 +66,11 @@ class ExtractionResult:
     confidence: float
     processing_time_ms: float
     extraction_method: str
-    pages: List[PageOCRResult] = field(default_factory=list)
-    error: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    pages: list[PageOCRResult] = field(default_factory=list)
+    error: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    backend_status: BackendStatus | None = None
+    page_errors: list[PageError] = field(default_factory=list)
 
     @property
     def full_text(self) -> str:

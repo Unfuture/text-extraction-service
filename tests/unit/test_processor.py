@@ -6,18 +6,21 @@ Tests for the TwoPassProcessor class that handles PDF text extraction
 with intelligent OCR routing.
 """
 
-import pytest
 from pathlib import Path
-from unittest.mock import Mock, MagicMock, patch
-from dataclasses import dataclass
 
-from text_extraction import TwoPassProcessor, ProcessorConfig, Quality, ExtractionResult
+import pytest
+
+from text_extraction import (
+    ExtractionResult,
+    ProcessorConfig,
+    Quality,
+    TwoPassProcessor,
+)
 from text_extraction.backends.base import (
     BaseOCRBackend,
-    OCRResult,
     ExtractionMethod,
+    OCRResult,
 )
-
 
 # =============================================================================
 # Mock Backend Fixtures
@@ -292,7 +295,7 @@ class TestTwoPassProcessorFallback:
             config=ProcessorConfig(fallback_on_error=False),
         )
 
-        result = processor.extract(pdf_path, quality="balanced")
+        processor.extract(pdf_path, quality="balanced")
 
         # Fallback should NOT have been called
         assert len(mock_fallback_backend.extract_calls) == 0
@@ -311,6 +314,12 @@ class TestTwoPassProcessorFallback:
         # Should still succeed with direct extraction
         assert result.success is True
         assert "direct" in result.extraction_method
+        # Backend status should reflect unavailability
+        assert result.backend_status is not None
+        assert result.backend_status.primary_available is False
+        # Page errors should be populated for image pages that needed OCR
+        assert len(result.page_errors) > 0
+        assert result.page_errors[0].error == "backend unavailable"
 
 
 # =============================================================================
@@ -329,7 +338,7 @@ class TestPageNeedsOCR:
         pdf_path = create_image_pdf("image.pdf")
         processor = TwoPassProcessor(primary_backend=mock_primary_backend)
 
-        result = processor.extract(pdf_path, quality="fast")
+        processor.extract(pdf_path, quality="fast")
 
         # No OCR calls with fast quality
         assert len(mock_primary_backend.extract_calls) == 0
@@ -344,7 +353,7 @@ class TestPageNeedsOCR:
         # Reset call tracking
         mock_primary_backend.extract_calls = []
 
-        result = processor.extract(pdf_path, quality="balanced")
+        processor.extract(pdf_path, quality="balanced")
 
         # OCR should only be called for image pages (page 2)
         ocr_pages = [call[1] for call in mock_primary_backend.extract_calls]
@@ -494,3 +503,166 @@ class TestExtractionResult:
 
         assert result.success is False
         assert result.error == "Test error"
+
+    def test_backend_status_defaults(self):
+        """Test ExtractionResult with backend_status and page_errors defaults."""
+        result = ExtractionResult(
+            success=True,
+            file_name="test.pdf",
+            pdf_type="pure_text",
+            total_pages=1,
+            text="Test",
+            word_count=1,
+            confidence=1.0,
+            processing_time_ms=10.0,
+            extraction_method="direct",
+        )
+
+        assert result.backend_status is None
+        assert result.page_errors == []
+
+
+# =============================================================================
+# OCR Failure Cascade Tests
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestOCRFailureCascade:
+    """Tests for OCR failure tracking via backend_status and page_errors."""
+
+    def test_image_pdf_no_backend_has_page_errors(
+        self, create_image_pdf
+    ):
+        """Pure image PDF with no backend → page_errors populated."""
+        pdf_path = create_image_pdf("image.pdf")
+        processor = TwoPassProcessor(primary_backend=None)
+
+        result = processor.extract(pdf_path, quality="balanced")
+
+        assert result.success is True
+        # No primary backend means no OCR attempt, but _extract_page_text
+        # skips OCR when primary_backend is None → no page_errors
+        # (errors only tracked when OCR was attempted)
+        assert result.backend_status is not None
+        assert result.backend_status.primary_backend == "none"
+        assert result.backend_status.primary_available is False
+
+    def test_image_pdf_unavailable_backend_has_page_errors(
+        self, mock_unavailable_backend, create_image_pdf
+    ):
+        """Pure image PDF with unavailable backend → page_errors populated."""
+        pdf_path = create_image_pdf("image.pdf")
+        processor = TwoPassProcessor(primary_backend=mock_unavailable_backend)
+
+        result = processor.extract(pdf_path, quality="balanced")
+
+        assert result.success is True
+        assert result.backend_status is not None
+        assert result.backend_status.primary_available is False
+        assert result.backend_status.failed_pages > 0
+        assert len(result.page_errors) > 0
+        for pe in result.page_errors:
+            assert pe.error == "backend unavailable"
+
+    def test_image_pdf_failing_backend_has_page_errors(
+        self, mock_failing_backend, create_image_pdf
+    ):
+        """Backend throws exception → errors captured in page_errors."""
+        pdf_path = create_image_pdf("image.pdf")
+        processor = TwoPassProcessor(
+            primary_backend=mock_failing_backend,
+            config=ProcessorConfig(fallback_on_error=False),
+        )
+
+        result = processor.extract(pdf_path, quality="balanced")
+
+        assert result.success is True
+        assert len(result.page_errors) > 0
+        assert "Mock OCR failure" in result.page_errors[0].error
+        assert result.backend_status is not None
+        assert result.backend_status.failed_pages == len(result.page_errors)
+
+    def test_text_pdf_no_backend_no_errors(
+        self, create_text_pdf
+    ):
+        """Text PDF without OCR backend → no errors (OCR not needed)."""
+        pdf_path = create_text_pdf("text.pdf", "Hello World")
+        processor = TwoPassProcessor(primary_backend=None)
+
+        result = processor.extract(pdf_path, quality="balanced")
+
+        assert result.success is True
+        assert len(result.page_errors) == 0
+        assert result.backend_status is not None
+        assert result.backend_status.attempted_pages == 0
+
+    def test_hybrid_pdf_partial_errors(
+        self, mock_failing_backend, create_hybrid_pdf
+    ):
+        """Hybrid PDF with failing backend → errors only for image pages."""
+        pdf_path = create_hybrid_pdf("hybrid.pdf")
+        processor = TwoPassProcessor(
+            primary_backend=mock_failing_backend,
+            config=ProcessorConfig(fallback_on_error=False),
+        )
+
+        result = processor.extract(pdf_path, quality="balanced")
+
+        assert result.success is True
+        # Only image pages should have errors
+        error_pages = {pe.page_number for pe in result.page_errors}
+        # Page 1 is text, page 2 is image in hybrid PDFs
+        assert 1 not in error_pages
+        assert 2 in error_pages
+
+    def test_fast_quality_image_pdf_no_errors(
+        self, mock_failing_backend, create_image_pdf
+    ):
+        """Fast quality skips OCR → no errors even with failing backend."""
+        pdf_path = create_image_pdf("image.pdf")
+        processor = TwoPassProcessor(primary_backend=mock_failing_backend)
+
+        result = processor.extract(pdf_path, quality="fast")
+
+        assert result.success is True
+        assert len(result.page_errors) == 0
+        assert result.backend_status is not None
+        assert result.backend_status.attempted_pages == 0
+
+    def test_successful_ocr_no_errors(
+        self, mock_primary_backend, create_image_pdf
+    ):
+        """Successful OCR → no page_errors, backend_status shows success."""
+        pdf_path = create_image_pdf("image.pdf")
+        processor = TwoPassProcessor(primary_backend=mock_primary_backend)
+
+        result = processor.extract(pdf_path, quality="balanced")
+
+        assert result.success is True
+        assert len(result.page_errors) == 0
+        assert result.backend_status is not None
+        assert result.backend_status.primary_available is True
+        assert result.backend_status.successful_pages > 0
+        assert result.backend_status.failed_pages == 0
+
+    def test_empty_ocr_response_has_page_errors(
+        self, create_image_pdf
+    ):
+        """Backend returns empty text (no exception) → page_errors populated."""
+        empty_backend = MockOCRBackend(
+            name="MockEmpty",
+            available=True,
+            return_text="",  # Returns empty string
+        )
+        pdf_path = create_image_pdf("image.pdf")
+        processor = TwoPassProcessor(
+            primary_backend=empty_backend,
+            config=ProcessorConfig(fallback_on_error=False),
+        )
+
+        result = processor.extract(pdf_path, quality="balanced")
+
+        assert result.success is True
+        assert len(result.page_errors) > 0
+        assert "empty response" in result.page_errors[0].error
