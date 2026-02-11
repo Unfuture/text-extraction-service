@@ -52,6 +52,7 @@ _gemini_backend: GeminiBackend | None = None
 _tesseract_backend: TesseractBackend | None = None
 _langdock_processor: TwoPassProcessor | None = None
 _gemini_processor: TwoPassProcessor | None = None
+_tesseract_processor: TwoPassProcessor | None = None
 
 
 def _is_gemini_model(model: str | None) -> bool:
@@ -59,12 +60,20 @@ def _is_gemini_model(model: str | None) -> bool:
     return bool(model and model.startswith("gemini-"))
 
 
+def _is_tesseract_model(model: str | None) -> bool:
+    """Check if the requested model should be routed to the Tesseract backend."""
+    return bool(model and model == "tesseract")
+
+
 def get_processor(model: str | None = None) -> TwoPassProcessor:
     """
     Get or create the TwoPassProcessor for the given model.
 
-    Routes gemini-* models to GeminiBackend, all others to LangdockBackend.
+    Routes tesseract to TesseractBackend, gemini-* to GeminiBackend,
+    all others to LangdockBackend.
     """
+    if _is_tesseract_model(model):
+        return _get_tesseract_processor()
     if _is_gemini_model(model):
         return _get_gemini_processor()
     return _get_default_processor()
@@ -126,6 +135,28 @@ def _get_gemini_processor() -> TwoPassProcessor:
         )
 
     return _gemini_processor
+
+
+def _get_tesseract_processor() -> TwoPassProcessor:
+    """Get Tesseract-only processor (free, local, fast)."""
+    global _tesseract_processor, _tesseract_backend
+
+    if _tesseract_processor is None:
+        if _tesseract_backend is None:
+            _tesseract_backend = TesseractBackend()
+
+        primary = _tesseract_backend if _tesseract_backend.is_available() else None
+
+        _tesseract_processor = TwoPassProcessor(
+            primary_backend=primary,
+            fallback_backend=None,
+            config=ProcessorConfig(
+                fallback_on_error=False,
+                include_page_markers=True,
+            ),
+        )
+
+    return _tesseract_processor
 
 
 # Register async jobs router
@@ -364,12 +395,13 @@ async def extract_text(
     model: str | None = Query(
         default=None,
         description=(
-            "OCR model override (EU region only). "
+            "OCR model override. "
             "Default: claude-sonnet-4-5@20250929. "
             "Available: claude-sonnet-4-5@20250929, claude-haiku-4-5@20251001, "
             "claude-opus-4-5@20251101, claude-opus-4-6@default, "
             "gemini-2.5-flash, gemini-2.5-pro, "
-            "gpt-5-mini-eu, gpt-5.1, gpt-5.2, gpt-5.2-pro"
+            "gpt-5-mini-eu, gpt-5.1, gpt-5.2, gpt-5.2-pro, "
+            "tesseract (free, local, ~2s/page)"
         ),
     ),
 ):
@@ -395,6 +427,7 @@ async def extract_text(
     | `gpt-5.1` | OpenAI | Good quality |
     | `gpt-5.2` | OpenAI | Latest GPT |
     | `gpt-5.2-pro` | OpenAI | Highest OpenAI quality |
+    | `tesseract` | Local | Free, ~2s/page, no API key needed |
 
     Use **GET /api/v1/models** for the live list from the API.
     """

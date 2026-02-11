@@ -227,6 +227,40 @@ class TestGeminiModelRouting:
 
 
 # =============================================================================
+# TestTesseractModelRouting
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestTesseractModelRouting:
+    """Test tesseract model routing logic from service/main.py."""
+
+    def test_tesseract_routes_to_tesseract(self):
+        """'tesseract' routes to TesseractBackend."""
+        from service.main import _is_tesseract_model
+
+        assert _is_tesseract_model("tesseract") is True
+
+    def test_tesseract_prefix_does_not_match(self):
+        """'tesseract-v2' does NOT route to Tesseract."""
+        from service.main import _is_tesseract_model
+
+        assert _is_tesseract_model("tesseract-v2") is False
+
+    def test_gemini_is_not_tesseract(self):
+        """gemini models do NOT route to Tesseract."""
+        from service.main import _is_tesseract_model
+
+        assert _is_tesseract_model("gemini-2.5-flash") is False
+
+    def test_none_is_not_tesseract(self):
+        """None does NOT route to Tesseract."""
+        from service.main import _is_tesseract_model
+
+        assert _is_tesseract_model(None) is False
+
+
+# =============================================================================
 # TestGeminiRetryBehavior
 # =============================================================================
 
