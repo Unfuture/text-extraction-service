@@ -54,6 +54,11 @@ curl http://localhost:1337/health
 curl -X POST -F "file=@test.pdf" http://localhost:1337/api/v1/classify
 curl -X POST -F "file=@test.pdf" -F "quality=balanced" http://localhost:1337/api/v1/extract
 
+# Async extraction (for large PDFs)
+curl -X POST -F "file=@large.pdf" -F "quality=balanced" http://localhost:1337/api/v1/extract/async
+curl http://localhost:1337/api/v1/jobs/{job_id}
+curl http://localhost:1337/api/v1/jobs/{job_id}/result
+
 # OCR Evaluation System
 python -m eval download                                      # Download all datasets
 python -m eval download --dataset german_invoices             # Download one dataset
@@ -122,6 +127,8 @@ Last resort: Direct extraction only (no OCR)
 **Content Router** (`router.py`): Maps quality levels to routing strategies (DIRECT_ONLY/OCR_SELECTIVE/OCR_ALL). Provides cost estimation in EUR and time estimates.
 
 **Lazy Backend Initialization**: `service/main.py` initializes OCR backends lazily on first request, not at startup. This means the service starts fast even without API keys configured.
+
+**Async Job Queue** (`service/jobs.py`): For large PDFs (50+ pages), use the async endpoint to avoid HTTP timeouts. Jobs run in background threads via `asyncio.run_in_executor`. Uses `InMemoryJobStore` (development); extend with `RedisJobStore` for production persistence. Jobs expire after 24 hours. Optional webhook notifications via `callback_url` parameter.
 
 **JSON Repair** (`json_repair.py`): Fixes common LLM JSON errors: missing commas, trailing commas, unescaped quotes. Always use this before parsing LLM-generated JSON.
 
@@ -360,10 +367,12 @@ Artifact Registry: text-extraction (repository)
 | Gemini 429 retries | GeminiBackend has tenacity retry (5 attempts, exponential backoff 5-60s) | gemini.py |
 | Eval page headers | `strip_page_headers()` removes `--- Page N ---` markers before metric comparison | metrics.py |
 | Langdock model names | Must match exactly; use error response to discover available models | langdock.py |
+| Async jobs in-memory | Jobs lost on restart; use Redis-backed store for production | service/jobs.py |
+| Async progress granularity | Only 0/10/100% - TwoPassProcessor has no per-page callback | service/jobs.py |
 
 ## TODO
 
-- Async job queue for large PDFs (`service/jobs.py`)
+- Redis-backed JobStore for production async job persistence
 - Eval: CI integration with baseline regression check
 - Eval: Test with olmOCR-bench and ocr-benchmark datasets
 - Eval: Run full 97-sample evaluation on German invoices (currently limited to 10)

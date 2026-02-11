@@ -30,6 +30,8 @@ from text_extraction import (
 )
 from text_extraction.backends import GeminiBackend, LangdockBackend, TesseractBackend
 
+from service.jobs import InMemoryJobStore, create_router
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Text Extraction Service",
@@ -39,10 +41,12 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# Initialize detector and OCR backends
+# Initialize detector, OCR backends, and job store
 detector = PDFTypeDetector()
+_job_store = InMemoryJobStore()
 
 # Initialize OCR backends (lazy - check availability on use)
+# Note: get_processor is defined below, router registered after function definition
 _langdock_backend: LangdockBackend | None = None
 _gemini_backend: GeminiBackend | None = None
 _tesseract_backend: TesseractBackend | None = None
@@ -122,6 +126,10 @@ def _get_gemini_processor() -> TwoPassProcessor:
         )
 
     return _gemini_processor
+
+
+# Register async jobs router
+app.include_router(create_router(store=_job_store, get_processor_fn=get_processor))
 
 
 # ============================================================================
