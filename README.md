@@ -9,7 +9,8 @@ A standalone text extraction library and REST API service for PDF files with int
 ## Features
 
 - **PDF Type Detection**: Automatically classify PDFs as `PURE_TEXT`, `PURE_IMAGE`, or `HYBRID`
-- **Multi-Backend OCR**: LLM OCR (Claude Sonnet 4.5 via Langdock) + Tesseract fallback
+- **Multi-Backend OCR**: LLM OCR (Claude via Langdock, Gemini via Google API) + Tesseract fallback
+- **Model-Based Routing**: `gemini-*` models route to Gemini API, others to Langdock
 - **Intelligent Routing**: Route pages to the optimal extraction method
 - **FastAPI Service**: REST API with Swagger documentation
 - **Docker Ready**: Multi-stage build with Tesseract pre-installed
@@ -32,7 +33,7 @@ cp .env.example .env
 docker-compose up --build
 
 # Test
-curl http://localhost:8080/health
+curl http://localhost:1337/health
 ```
 
 ### Local Development
@@ -49,10 +50,10 @@ pip install -e ".[dev,service,tesseract]"
 cp .env.example .env
 
 # Run service
-uvicorn service.main:app --host 0.0.0.0 --port 8080 --reload
+uvicorn service.main:app --host 0.0.0.0 --port 1337 --reload
 
 # Open Swagger docs
-open http://localhost:8080/docs
+open http://localhost:1337/docs
 ```
 
 ## API Endpoints
@@ -68,7 +69,7 @@ open http://localhost:8080/docs
 ### Classify PDF
 
 ```bash
-curl -X POST "http://localhost:8080/api/v1/classify" \
+curl -X POST "http://localhost:1337/api/v1/classify" \
   -F "file=@document.pdf"
 ```
 
@@ -90,7 +91,7 @@ Response:
 ### Extract Text
 
 ```bash
-curl -X POST "http://localhost:8080/api/v1/extract" \
+curl -X POST "http://localhost:1337/api/v1/extract" \
   -F "file=@document.pdf" \
   -F "quality=balanced"
 ```
@@ -133,13 +134,19 @@ print(f"Image pages: {result.image_pages}")  # [2, 4]
 ### OCR Backends
 
 ```python
-from text_extraction.backends import LangdockBackend, TesseractBackend
+from text_extraction.backends import LangdockBackend, GeminiBackend, TesseractBackend
 from pathlib import Path
 
-# LLM-based OCR (best quality)
+# LLM-based OCR via Langdock (Claude, GPT models)
 langdock = LangdockBackend()
 if langdock.is_available():
     result = langdock.extract_text(Path("scan.pdf"), page_number=1)
+    print(result.text)
+
+# LLM-based OCR via Google Gemini (native multimodal)
+gemini = GeminiBackend()
+if gemini.is_available():
+    result = gemini.extract_text(Path("scan.pdf"), page_number=1)
     print(result.text)
 
 # Local OCR fallback (offline, free)
@@ -154,11 +161,15 @@ if tesseract.is_available():
 ### Environment Variables
 
 ```bash
-# Langdock API (required for LLM OCR)
+# Langdock API (for Claude/GPT OCR via Langdock)
 LANGDOCK_API_KEY=sk-your-api-key-here
 LANGDOCK_UPLOAD_URL=https://api.langdock.com/attachment/v1/upload
 LANGDOCK_ASSISTANT_URL=https://api.langdock.com/assistant/v1/chat/completions
 LANGDOCK_OCR_MODEL=claude-sonnet-4-5@20250929
+
+# Gemini API (for Google Gemini OCR)
+GEMINI_API_KEY=your-gemini-api-key
+GEMINI_OCR_MODEL=gemini-2.5-flash
 
 # Tesseract (optional)
 TESSERACT_PATH=/usr/bin/tesseract
@@ -180,7 +191,8 @@ text-extraction-service/
 │   ├── json_repair.py            # JSON error recovery
 │   └── backends/
 │       ├── base.py               # Abstract backend
-│       ├── langdock.py           # LLM OCR (Claude)
+│       ├── langdock.py           # LLM OCR (Claude/GPT via Langdock)
+│       ├── gemini.py             # LLM OCR (Gemini via Google API)
 │       └── tesseract.py          # Local OCR
 ├── service/                       # FastAPI service
 │   └── main.py                   # API endpoints
@@ -262,15 +274,28 @@ ruff format src/ service/
 
 ## OCR Backend Comparison
 
-| Backend | Quality | Speed | Cost | Offline |
-|---------|---------|-------|------|---------|
-| Langdock (Claude) | Excellent | Slow (~25s/page) | API costs | No |
-| Tesseract | Good | Fast (~2s/page) | Free | Yes |
+| Backend | Quality | Speed | Cost | Offline | EU Data Residency |
+|---------|---------|-------|------|---------|-------------------|
+| Langdock (Claude) | Excellent | ~25s/page | API costs | No | Yes (EU endpoint) |
+| Gemini (Google) | Excellent | ~5s/page | API costs | No | No (Developer API) |
+| Tesseract | Good | ~2s/page | Free | Yes | Yes (local) |
 
-The service automatically falls back from Langdock to Tesseract if:
-- `LANGDOCK_API_KEY` is not set
-- Langdock API is unavailable
-- API request fails
+### Model-Based Routing
+
+The service routes OCR requests based on the model name:
+- `gemini-*` models (e.g. `gemini-2.5-flash`, `gemini-2.5-pro`) → **GeminiBackend**
+- All other models (e.g. `claude-sonnet-4-5@20250929`) → **LangdockBackend**
+- Fallback for both: **TesseractBackend** (if installed)
+
+```bash
+# Use Gemini for OCR
+curl -X POST -F "file=@scan.pdf" -F "quality=balanced" \
+  "http://localhost:1337/api/v1/extract?model=gemini-2.5-flash"
+
+# Use Langdock/Claude for OCR (default)
+curl -X POST -F "file=@scan.pdf" -F "quality=balanced" \
+  http://localhost:1337/api/v1/extract
+```
 
 ## Origin
 

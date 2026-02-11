@@ -7,6 +7,7 @@
 | PDFTypeDetector | `detector.py` | ✅ DONE |
 | BaseOCRBackend | `backends/base.py` | ✅ DONE |
 | LangdockBackend | `backends/langdock.py` | ✅ DONE |
+| GeminiBackend | `backends/gemini.py` | ✅ DONE |
 | TesseractBackend | `backends/tesseract.py` | ✅ DONE |
 | JSON Repair | `json_repair.py` | ✅ DONE |
 | FastAPI Service | `service/main.py` | ✅ DONE |
@@ -29,9 +30,9 @@
 docker-compose up --build
 
 # Test endpoints
-curl http://localhost:8080/health
-curl -X POST -F "file=@test.pdf" http://localhost:8080/api/v1/classify
-curl -X POST -F "file=@test.pdf" http://localhost:8080/api/v1/extract
+curl http://localhost:1337/health
+curl -X POST -F "file=@test.pdf" http://localhost:1337/api/v1/classify
+curl -X POST -F "file=@test.pdf" http://localhost:1337/api/v1/extract
 ```
 
 ### Local Development
@@ -41,7 +42,7 @@ curl -X POST -F "file=@test.pdf" http://localhost:8080/api/v1/extract
 pip install -e ".[dev,service,tesseract]"
 
 # Run service
-uvicorn service.main:app --host 0.0.0.0 --port 8080 --reload
+uvicorn service.main:app --host 0.0.0.0 --port 1337 --reload
 
 # Run tests
 pytest
@@ -73,11 +74,15 @@ pytest --cov=src/text_extraction --cov-report=html
 ## Environment Variables
 
 ```bash
-# Langdock API (required for LLM OCR)
+# Langdock API (for Claude/GPT OCR)
 LANGDOCK_API_KEY=sk-...
 LANGDOCK_UPLOAD_URL=https://api.langdock.com/attachment/v1/upload
 LANGDOCK_ASSISTANT_URL=https://api.langdock.com/assistant/v1/chat/completions
 LANGDOCK_OCR_MODEL=claude-sonnet-4-5@20250929
+
+# Gemini API (for Google Gemini OCR)
+GEMINI_API_KEY=AIza...
+GEMINI_OCR_MODEL=gemini-2.5-flash
 
 # Tesseract (optional)
 TESSERACT_PATH=/usr/bin/tesseract
@@ -99,7 +104,8 @@ DEFAULT_QUALITY=balanced
 |------|---------|
 | `src/text_extraction/detector.py` | PDF type detection |
 | `src/text_extraction/backends/base.py` | Abstract OCR backend |
-| `src/text_extraction/backends/langdock.py` | LLM OCR via Claude |
+| `src/text_extraction/backends/langdock.py` | LLM OCR via Claude/GPT (Langdock) |
+| `src/text_extraction/backends/gemini.py` | LLM OCR via Google Gemini |
 | `src/text_extraction/backends/tesseract.py` | Local OCR fallback |
 | `src/text_extraction/json_repair.py` | JSON error recovery |
 | `service/main.py` | FastAPI REST API |
@@ -126,33 +132,37 @@ DEFAULT_QUALITY=balanced
 
 ---
 
-## OCR Backend Selection
+## OCR Backend Selection (Model-Based Routing)
 
 ```
-get_ocr_backend()
+get_processor(model=...)
         │
         ▼
-┌───────────────────┐
-│ LangdockBackend   │ ← Primary (best quality)
-│ is_available()?   │
-└─────────┬─────────┘
-          │ No API key
-          ▼
-┌───────────────────┐
-│ TesseractBackend  │ ← Fallback (offline, free)
-│ is_available()?   │
-└─────────┬─────────┘
-          │ No Tesseract installed
-          ▼
+model starts with "gemini-"?
+    │ Yes                          │ No
+    ▼                              ▼
+┌───────────────────┐   ┌───────────────────┐
+│ GeminiBackend     │   │ LangdockBackend   │
+│ (Google Gemini)   │   │ (Claude/GPT)      │
+└─────────┬─────────┘   └─────────┬─────────┘
+          │                       │
+          ▼                       ▼
+┌───────────────────┐   ┌───────────────────┐
+│ TesseractBackend  │   │ TesseractBackend  │
+│ (Fallback)        │   │ (Fallback)        │
+└─────────┬─────────┘   └─────────┬─────────┘
+          │                       │
+          ▼                       ▼
     Direct extraction only
 ```
 
 ### Backend Comparison
 
-| Backend | Quality | Speed | Cost | Offline |
-|---------|---------|-------|------|---------|
-| Langdock (Claude) | Excellent | ~25s/page | API | No |
-| Tesseract | Good | ~2s/page | Free | Yes |
+| Backend | Quality | Speed | Cost | Offline | EU Data Residency |
+|---------|---------|-------|------|---------|-------------------|
+| Langdock (Claude) | Excellent | ~25s/page | API | No | Yes |
+| Gemini (Google) | Excellent | ~5s/page | API | No | No |
+| Tesseract | Good | ~2s/page | Free | Yes | Yes |
 
 ---
 
@@ -206,13 +216,19 @@ print(f"Image pages: {result.image_pages}")
 ### Use OCR Backend
 
 ```python
-from text_extraction.backends import LangdockBackend, TesseractBackend
+from text_extraction.backends import LangdockBackend, GeminiBackend, TesseractBackend
 from pathlib import Path
 
-# LLM OCR
+# LLM OCR via Langdock
 langdock = LangdockBackend()
 if langdock.is_available():
     result = langdock.extract_text(Path("scan.pdf"), page_number=1)
+    print(result.text)
+
+# LLM OCR via Gemini
+gemini = GeminiBackend()
+if gemini.is_available():
+    result = gemini.extract_text(Path("scan.pdf"), page_number=1)
     print(result.text)
 
 # Local OCR
@@ -260,6 +276,8 @@ class CustomBackend(BaseOCRBackend):
 | PyMuPDF import | Use `import fitz` not `import pymupdf` |
 | Langdock model name | Must include version: `claude-sonnet-4-5@20250929` |
 | Langdock API payload | Requires `assistant.name` field |
+| Gemini Developer API | No dedicated EU endpoint; use Vertex AI for strict EU residency |
+| Gemini model routing | Models starting with `gemini-` auto-route to GeminiBackend |
 | Docker non-root | Use `--chown=appuser:appuser` in COPY |
 | Empty PDF pages | Treated as image pages (need OCR) |
 
@@ -269,6 +287,7 @@ class CustomBackend(BaseOCRBackend):
 
 - [x] PDFTypeDetector working (99%+ accuracy)
 - [x] LangdockBackend fully functional
+- [x] GeminiBackend fully functional (model-based routing)
 - [x] TesseractBackend working as fallback
 - [x] FastAPI service with /health, /classify, /extract
 - [x] Docker build working

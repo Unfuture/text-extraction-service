@@ -38,27 +38,26 @@
 |  |                      BACKEND LAYER                                |     |
 |  +------------------------------------------------------------------+     |
 |  |                                                                   |     |
-|  |  +----------------+  +----------------+  +--------------------+   |     |
-|  |  | LangdockBackend|  |TesseractBackend|  | CloudVisionBackend |   |     |
-|  |  |----------------|  |----------------|  |--------------------|   |     |
-|  |  | extract_text() |  | extract_text() |  | extract_text()     |   |     |
-|  |  | is_available() |  | is_available() |  | is_available()     |   |     |
-|  |  |                |  |                |  |                    |   |     |
-|  |  | Status: TODO   |  | Status: TODO   |  | Status: OPTIONAL   |   |     |
-|  |  +-------+--------+  +-------+--------+  +--------------------+   |     |
-|  |          |                   |                                    |     |
-|  |          |                   |                                    |     |
-|  +------------------------------------------------------------------+     |
-|             |                   |                                          |
-|             v                   v                                          |
-|  +------------------------------------------------------------------+     |
-|  |                    EXTERNAL SERVICES                              |     |
-|  +------------------------------------------------------------------+     |
-|  |  +----------------+  +----------------+  +--------------------+   |     |
-|  |  | Langdock API   |  | Tesseract      |  | Cloud Vision API   |   |     |
-|  |  | (Claude/GPT)   |  | (Local)        |  | (GCP)              |   |     |
-|  |  +----------------+  +----------------+  +--------------------+   |     |
-|  +------------------------------------------------------------------+     |
+|  |  +----------------+  +--------------+  +----------------+  +------------------+  |
+|  |  | LangdockBackend|  | GeminiBackend|  |TesseractBackend|  |CloudVisionBackend|  |
+|  |  |----------------|  |--------------|  |----------------|  |------------------|  |
+|  |  | extract_text() |  |extract_text()|  | extract_text() |  | extract_text()   |  |
+|  |  | is_available() |  |is_available()|  | is_available() |  | is_available()   |  |
+|  |  |                |  |              |  |                |  |                  |  |
+|  |  | Status: DONE   |  | Status: DONE |  | Status: DONE   |  | Status: OPTIONAL |  |
+|  |  +-------+--------+  +------+-------+  +-------+--------+  +------------------+  |
+|  |          |                  |                   |                                 |
+|  +------------------------------------------------------------------+               |
+|             |                  |                   |                                 |
+|             v                  v                   v                                 |
+|  +------------------------------------------------------------------+               |
+|  |                    EXTERNAL SERVICES                              |               |
+|  +------------------------------------------------------------------+               |
+|  |  +----------------+  +----------------+  +----------------+  +----------------+  |
+|  |  | Langdock API   |  | Gemini API     |  | Tesseract      |  | Cloud Vision   |  |
+|  |  | (Claude/GPT)   |  | (Google)       |  | (Local)        |  | (GCP)          |  |
+|  |  +----------------+  +----------------+  +----------------+  +----------------+  |
+|  +------------------------------------------------------------------+               |
 |                                                                            |
 +============================================================================+
 ```
@@ -171,12 +170,19 @@ BaseOCRBackend (ABC)
     |
     +-- LangdockBackend
     |       - api_key
-    |       - config: BackendConfig
-    |       - upload_url
+    |       - model, upload_url, assistant_url
     |       + extract_text()
     |       + is_available()
     |       + _upload_file()
-    |       + _make_api_call()
+    |       + _ocr_with_langdock()
+    |
+    +-- GeminiBackend
+    |       - api_key
+    |       - model (default: gemini-2.5-flash)
+    |       + extract_text()
+    |       + is_available()
+    |       + _get_client() (lazy google.genai.Client)
+    |       + _pdf_page_to_image() (PDF → PIL Image)
     |
     +-- TesseractBackend
     |       - tesseract_path
@@ -298,8 +304,9 @@ text-extraction-service/
 |   |   +-- backends/
 |   |   |   +-- __init__.py
 |   |   |   +-- base.py              # [READY] BaseOCRBackend
-|   |   |   +-- langdock.py          # [TODO] LangdockBackend
-|   |   |   +-- tesseract.py         # [TODO] TesseractBackend
+|   |   |   +-- langdock.py          # [DONE] LangdockBackend
+|   |   |   +-- gemini.py            # [DONE] GeminiBackend
+|   |   |   +-- tesseract.py         # [DONE] TesseractBackend
 |   |   |
 |   |   +-- utils/
 |   |       +-- __init__.py
@@ -447,19 +454,19 @@ result = router.extract("document.pdf")
 
 ```bash
 # Sync extraction
-curl -X POST http://localhost:8080/api/v1/extract \
+curl -X POST http://localhost:1337/api/v1/extract \
   -H "X-API-Key: your-key" \
   -F "file=@invoice.pdf" \
   -F 'options={"backend":"auto","language":"deu"}'
 
 # Async extraction
-curl -X POST http://localhost:8080/api/v1/extract/async \
+curl -X POST http://localhost:1337/api/v1/extract/async \
   -H "X-API-Key: your-key" \
   -F "file=@large_document.pdf" \
   -F 'callback_url=https://my-service.com/webhook'
 
 # Check job status
-curl http://localhost:8080/api/v1/jobs/550e8400-e29b-41d4-a716-446655440000 \
+curl http://localhost:1337/api/v1/jobs/550e8400-e29b-41d4-a716-446655440000 \
   -H "X-API-Key: your-key"
 ```
 
